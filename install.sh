@@ -24,6 +24,98 @@ if [ ! -d "/data/data/com.termux" ] && [ "${ANTSEED_PI_FORCE:-0}" != "1" ]; then
     die "Aborting."
 fi
 
+# --- 0. pick a fast repo mirror ----------------------------------------------
+# packages.termux.dev can be very slow from some networks (~70 kB/s → a ~30 MB
+# clang download takes >10 min). Probe a handful of official mirrors for real
+# throughput and point apt at the fastest one before the big install. Fully
+# non-interactive (safe under `curl | bash`): never reads stdin, never prompts.
+# If probing fails — no curl, no network, every mirror dead — keep the
+# configured default mirror.
+
+MIRRORS=(
+    https://packages.termux.dev/apt/termux-main
+    https://packages-cf.termux.dev/apt/termux-main
+    https://mirror.mwt.me/termux/main
+    https://grimler.se/termux/termux-main
+    https://ro.mirror.flokinet.net/termux/termux-main
+    https://mirror.freedif.org/termux/termux-main
+    https://mirrors.nguyenhoang.cloud/termux/termux-main
+    https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main
+    https://mirrors.ustc.edu.cn/termux/apt/termux-main
+)
+
+apt_deb_arch() {
+    local a
+    a="$(dpkg --print-architecture 2>/dev/null || true)"
+    case "$a" in aarch64|arm|i686|x86_64) printf '%s' "$a"; return 0;; esac
+    case "$(uname -m 2>/dev/null)" in
+        aarch64)         echo aarch64 ;;
+        arm*|*armv*)     echo arm ;;
+        i?86)            echo i686 ;;
+        x86_64)          echo x86_64 ;;
+        *)               return 1 ;;
+    esac
+}
+
+# Write $1 as the main-repo mirror, whichever apt layout this Termux has.
+apply_termux_mirror() {
+    local url="$1" apt_dir="$PREFIX/etc/apt"
+    local mirror_cfg="$PREFIX/etc/termux/chosen_mirrors"
+    # Newer termux-tools: sources use mirror+file:.../chosen_mirrors. The file
+    # is a list tried in order — put the default back as a fallback entry.
+    if grep -rqs 'mirror+file:.*chosen_mirrors' "$apt_dir" 2>/dev/null; then
+        mkdir -p "$(dirname "$mirror_cfg")"
+        printf '%s\n' "$url" > "$mirror_cfg"
+        grep -qxF "${MIRRORS[0]}" "$mirror_cfg" || printf '%s\n' "${MIRRORS[0]}" >> "$mirror_cfg"
+        return 0
+    fi
+    # Older installs: rewrite the `deb <url> stable main` line in sources.list.
+    if [ -f "$apt_dir/sources.list" ] &&
+       grep -qE '^deb[[:space:]]+https?://' "$apt_dir/sources.list"; then
+        sed -i.bak -E \
+            "s|^(deb[[:space:]]+)https?://[^[:space:]]+([[:space:]]+stable[[:space:]]+main.*)$|\1${url}\2|" \
+            "$apt_dir/sources.list"
+        return 0
+    fi
+    return 1
+}
+
+choose_fast_mirror() {
+    command -v curl >/dev/null 2>&1 || return 1
+    local arch tmp speed best_url="" best_speed=0 i
+    arch="$(apt_deb_arch)" || return 1
+    tmp="$(mktemp -d)" || return 1
+
+    # Fetch the first 256 KiB of Packages.gz from every mirror in parallel and
+    # record each one's download speed (bytes/s). curl -f means a failed probe
+    # simply leaves no result file.
+    for i in "${!MIRRORS[@]}"; do
+        ( s="$(curl -fsSL --connect-timeout 4 --max-time 15 -r 0-262143 \
+                  -o /dev/null -w '%{speed_download}' \
+                  "${MIRRORS[$i]}/dists/stable/main/binary-${arch}/Packages.gz" \
+                  </dev/null 2>/dev/null)" \
+            && [ -n "$s" ] && printf '%s' "$s" > "$tmp/$i" ) &
+    done
+    wait
+
+    for i in "${!MIRRORS[@]}"; do
+        [ -s "$tmp/$i" ] || continue
+        speed="$(cat "$tmp/$i")"
+        if awk -v a="$speed" -v b="$best_speed" 'BEGIN { exit !(a > b) }'; then
+            best_speed="$speed"; best_url="${MIRRORS[$i]}"
+        fi
+    done
+    rm -rf "$tmp"
+    [ -n "$best_url" ] || return 1
+    apply_termux_mirror "$best_url" || return 1
+    info "Using Termux mirror $best_url (~$(awk -v b="$best_speed" 'BEGIN { printf "%.0f", b/1024 }') KiB/s)"
+}
+
+info "Probing Termux mirrors for the fastest one..."
+if ! choose_fast_mirror; then
+    warn "Mirror probe failed or all mirrors unreachable — keeping the default mirror."
+fi
+
 # --- 1. Termux packages ------------------------------------------------------
 info "Updating packages and installing dependencies (nodejs, git, jq, curl, termux-tools)..."
 # When run via `curl | bash`, stdin is the script itself — any child that reads
