@@ -26,12 +26,18 @@ fi
 
 # --- 1. Termux packages ------------------------------------------------------
 info "Updating packages and installing dependencies (nodejs, git, jq, curl, termux-tools)..."
-pkg update -y
-pkg install -y nodejs git jq curl coreutils procps
+# When run via `curl | bash`, stdin is the script itself — any child that reads
+# stdin (e.g. dpkg's conffile prompt for openssl.cnf) eats the rest of the
+# script and the install silently stops. Force conffile defaults and detach
+# stdin so no subprocess can consume the remaining script.
+export DEBIAN_FRONTEND=noninteractive
+DPKG_OPTS=(-o "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold")
+pkg update -y </dev/null
+apt-get "${DPKG_OPTS[@]}" install -y nodejs git jq curl coreutils procps </dev/null
 
 # --- 2. npm globals -----------------------------------------------------------
 info "Installing @antseed/cli and @mariozechner/pi-coding-agent from npm..."
-npm install -g @antseed/cli @mariozechner/pi-coding-agent
+npm install -g @antseed/cli @mariozechner/pi-coding-agent </dev/null
 
 command -v antseed >/dev/null || die "antseed CLI not on PATH after npm install"
 command -v pi      >/dev/null || die "pi not on PATH after npm install"
@@ -44,7 +50,7 @@ if [ -f "$SCRIPT_DIR/bin/antseed-pi" ]; then
     install -m 0755 "$SCRIPT_DIR/bin/antseed-pi" "$PREFIX/bin/antseed-pi"
 else
     curl -fsSL "https://raw.githubusercontent.com/CommunityPokeOrg/antseed-pi-termux/main/bin/antseed-pi" \
-        -o "$PREFIX/bin/antseed-pi"
+        -o "$PREFIX/bin/antseed-pi" </dev/null
     chmod 0755 "$PREFIX/bin/antseed-pi"
 fi
 
@@ -59,7 +65,7 @@ touch "$ENV_DIR/buyer.log"
 
 # --- 5. pi extension ----------------------------------------------------------
 info "Installing the AntSeed pi extension ($PI_ANTSEED_PKG)..."
-if ! pi install "$PI_ANTSEED_PKG"; then
+if ! pi install "$PI_ANTSEED_PKG" </dev/null; then
     warn "pi install failed — you can retry later with:  pi install $PI_ANTSEED_PKG"
     warn "or run pi with the extension once:  pi -e $PI_ANTSEED_PKG"
 fi
