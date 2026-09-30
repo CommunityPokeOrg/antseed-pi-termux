@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # antseed-pi — launch the pi coding agent wired to the AntSeed network on Termux.
 #
 # Ensures the AntSeed buyer proxy is running on http://localhost:8377, then
@@ -19,6 +19,12 @@ ENV_FILE="$ENV_DIR/env"
 PID_FILE="$ENV_DIR/buyer.pid"
 LOG_FILE="$ENV_DIR/buyer.log"
 BASE_URL="${ANTSEED_BASE_URL:-http://localhost:8377}"
+# Normalize like the pi extension does: tolerate a trailing '/' or '/v1'.
+# Without this the readiness check hits a 404 forever and — worse — we'd nohup
+# a second `antseed buyer start` behind an already-running proxy.
+BASE_URL="${BASE_URL%"${BASE_URL##*[!/]}"}"
+case "${BASE_URL,,}" in */v1) BASE_URL="${BASE_URL:0:${#BASE_URL}-3}" ;; esac
+[ -n "$BASE_URL" ] || BASE_URL="http://localhost:8377"
 READY_TIMEOUT="${ANTSEED_PI_READY_TIMEOUT:-60}"
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
@@ -34,6 +40,13 @@ load_env() {
         # shellcheck disable=SC1090
         . "$ENV_FILE"
     fi
+}
+
+# Only the paths that actually launch the proxy/pi need an identity.
+# status/stop/peers must work (and report 'identity: NOT configured') without
+# prompting for a key.
+require_identity() {
+    load_env
     if [ -z "${ANTSEED_IDENTITY_HEX:-}" ]; then
         if [ -t 0 ]; then
             warn "No AntSeed identity configured."
@@ -72,6 +85,7 @@ start_proxy() {
     # Keep the node process alive when the Termux session that launched it ends.
     nohup antseed buyer start >>"$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
+    info "Waiting for $BASE_URL — first start runs DHT peer discovery (can take ~30-60s)"
 
     local waited=0
     until proxy_ready; do
@@ -140,18 +154,18 @@ main() {
 
     case "$sub" in
         status) load_env; cmd_status ;;
-        stop)   load_env; stop_proxy ;;
+        stop)   stop_proxy ;;
         logs)   cmd_logs "$@" ;;
-        peers)  load_env; cmd_peers ;;
-        --)     shift; load_env; start_proxy; exec pi "$@" ;;
+        peers)  cmd_peers ;;
+        --)     shift; require_identity; start_proxy; exec pi "$@" ;;
         ""|start)
-            load_env
+            require_identity
             start_proxy
             info "Starting pi — pick an AntSeed route with /model antseed/<service>@<peer>"
             exec pi
             ;;
         *)  # anything else (e.g. -p "...", --model x) goes straight to pi
-            load_env
+            require_identity
             start_proxy
             exec pi "$@"
             ;;
