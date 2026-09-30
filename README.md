@@ -47,9 +47,12 @@ The installer:
    fastest one (keeps the default if probing fails — no prompts, safe under
    `curl | bash`)
 2. `pkg`/`apt-get install`s `nodejs`, `git`, `jq`, `curl`, `coreutils`, `procps`
-   plus the node-gyp toolchain (`python`, `make`, `clang`, `binutils`) —
-   `better-sqlite3` has no android/arm64 prebuild and compiles from source
-3. `npm install -g @antseed/cli @earendil-works/pi-coding-agent`
+   plus the native-build toolchain (`python`, `build-essential`,
+   `openssl-static`) — `better-sqlite3` and `node-datachannel` ship no
+   Android prebuilds and compile from source
+3. `npm install -g --ignore-scripts @antseed/cli @earendil-works/pi-coding-agent`,
+   then replays the native builds npm's lifecycle scripts can't do under
+   Node >= 26 (node-datachannel is built directly with `cmake-js`)
 4. installs `bin/antseed-pi` to `$PREFIX/bin/antseed-pi`
 5. creates `~/.antseed-pi/env` for your identity
 6. runs `pi install git:github.com/AntSeed/pi-antseed` so the extension loads

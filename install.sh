@@ -117,19 +117,21 @@ if ! choose_fast_mirror; then
 fi
 
 # --- 1. Termux packages ------------------------------------------------------
-info "Updating packages and installing dependencies (nodejs, git, jq, curl, termux-tools)..."
+info "Updating packages and installing dependencies (nodejs, git, jq, curl, python, build-essential, openssl-static, ...)..."
 # When run via `curl | bash`, stdin is the script itself — any child that reads
 # stdin (e.g. dpkg's conffile prompt for openssl.cnf) eats the rest of the
 # script and the install silently stops. Force conffile defaults and detach
 # stdin so no subprocess can consume the remaining script.
 export DEBIAN_FRONTEND=noninteractive
 DPKG_OPTS=(-o "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold")
-# python + make + clang + binutils: the node-gyp toolchain. Native modules like
-# better-sqlite3 ship no android/arm64 prebuilds, so they compile from source.
 pkg update -y </dev/null
+# python + build-essential (clang, make, cmake, binutils): the node-gyp/cmake-js
+# toolchain — native modules like better-sqlite3 and node-datachannel ship no
+# android prebuilds, so they compile from source. openssl-static provides the
+# static OpenSSL libs node-datachannel's CMake config requires.
 apt-get "${DPKG_OPTS[@]}" install -y \
     nodejs git jq curl coreutils procps \
-    python make clang binutils </dev/null
+    python build-essential openssl-static </dev/null
 
 # --- 2. npm globals -----------------------------------------------------------
 info "Installing @antseed/cli and @earendil-works/pi-coding-agent from npm..."
@@ -137,7 +139,46 @@ info "Installing @antseed/cli and @earendil-works/pi-coding-agent from npm..."
 # ever resolves upstream headers instead of Termux's shipped ones, gyp fails
 # to parse without this define. Harmless when the variable is never referenced.
 export GYP_DEFINES="${GYP_DEFINES:+$GYP_DEFINES }android_ndk_path=$PREFIX"
-npm install -g @antseed/cli @earendil-works/pi-coding-agent </dev/null
+# --ignore-scripts: npm aborts the whole install on the first failing lifecycle
+# script, and node-datachannel@0.7.0's `prebuild` step always crashes under
+# Node >= 26 ("does not support N-API version undefined"). Install silently,
+# then replay the scripts that actually matter below.
+npm install -g --ignore-scripts @antseed/cli @earendil-works/pi-coding-agent </dev/null
+
+GLOBAL_NM="$(npm root -g)"
+
+info "Building native modules for Termux (better-sqlite3, koffi, postinstalls)..."
+# Replay every preinstall/install/postinstall script in the installed tree.
+# Skipped on purpose:
+#  - node-datachannel: stock install script is broken under Node >= 26, built
+#    manually with cmake-js below instead
+#  - keytar: can't compile under Node >= 26 (stale node-addon-api) and nothing
+#    in the installed tree loads it
+while IFS= read -r pkgjson; do
+    dir="$(dirname "$pkgjson")"
+    case "$dir" in
+        */node-datachannel|*/keytar) continue ;;
+    esac
+    for script in preinstall install postinstall; do
+        if node -e 'process.exit(Object.keys(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).scripts||{}).includes(process.argv[2])?0:1)' "$pkgjson" "$script"; then
+            (cd "$dir" && npm run "$script" </dev/null) || warn "'$script' failed in $dir"
+        fi
+    done
+done < <(find "$GLOBAL_NM/@antseed" "$GLOBAL_NM/@earendil-works" "$GLOBAL_NM/@mariozechner" -name package.json 2>/dev/null)
+
+NDC_DIR="$(find "$GLOBAL_NM/@antseed" -type d -name node-datachannel | head -n1)"
+if [ -n "$NDC_DIR" ]; then
+    info "Building node-datachannel with cmake-js (P2P transport)..."
+    # Bypass the broken `prebuild` packaging step: install build deps, then run
+    # cmake-js directly. CMAKE_POLICY_VERSION_MINIMUM=3.5 lets CMake 4.x
+    # configure libdatachannel's ancient bundled deps.
+    if ! (cd "$NDC_DIR" \
+        && npm install --ignore-scripts --production=false </dev/null \
+        && node node_modules/cmake-js/bin/cmake-js clean </dev/null \
+        && CMAKE_POLICY_VERSION_MINIMUM=3.5 node node_modules/cmake-js/bin/cmake-js build </dev/null); then
+        warn "node-datachannel build failed — WebRTC P2P connections will be unavailable (CLI still works)"
+    fi
+fi
 
 command -v antseed >/dev/null || die "antseed CLI not on PATH after npm install"
 command -v pi      >/dev/null || die "pi not on PATH after npm install"
