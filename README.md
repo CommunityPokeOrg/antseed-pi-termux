@@ -1,6 +1,6 @@
 # antseed-pi-termux
 
-Launcher for running the **pi** coding agent (`@mariozechner/pi-coding-agent`)
+Launcher for running the **pi** coding agent (`@earendil-works/pi-coding-agent`)
 on the **AntSeed** network inside **Termux** on Android.
 
 It installs everything you need, starts the AntSeed buyer proxy on
@@ -43,8 +43,10 @@ curl -fsSL https://raw.githubusercontent.com/CommunityPokeOrg/antseed-pi-termux/
 
 The installer:
 
-1. `pkg install`s `nodejs`, `git`, `jq`, `curl`, `coreutils`, `procps`
-2. `npm install -g @antseed/cli @mariozechner/pi-coding-agent`
+1. `pkg`/`apt-get install`s `nodejs`, `git`, `jq`, `curl`, `coreutils`, `procps`
+   plus the node-gyp toolchain (`python`, `make`, `clang`, `binutils`) —
+   `better-sqlite3` has no android/arm64 prebuild and compiles from source
+2. `npm install -g @antseed/cli @earendil-works/pi-coding-agent`
 3. installs `bin/antseed-pi` to `$PREFIX/bin/antseed-pi`
 4. creates `~/.antseed-pi/env` for your identity
 5. runs `pi install git:github.com/AntSeed/pi-antseed` so the extension loads
@@ -145,7 +147,7 @@ session-wide `antseed buyer connection set` pin.
 
 - [AntSeed — Using the API](https://antseed.com/docs/guides/using-the-api/)
 - [AntSeed/pi-antseed](https://github.com/AntSeed/pi-antseed) — the pi extension
-- [pi coding agent](https://www.npmjs.com/package/@mariozechner/pi-coding-agent)
+- [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)
 
 ## License
 

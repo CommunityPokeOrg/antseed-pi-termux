@@ -32,12 +32,20 @@ info "Updating packages and installing dependencies (nodejs, git, jq, curl, term
 # stdin so no subprocess can consume the remaining script.
 export DEBIAN_FRONTEND=noninteractive
 DPKG_OPTS=(-o "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold")
+# python + make + clang + binutils: the node-gyp toolchain. Native modules like
+# better-sqlite3 ship no android/arm64 prebuilds, so they compile from source.
 pkg update -y </dev/null
-apt-get "${DPKG_OPTS[@]}" install -y nodejs git jq curl coreutils procps </dev/null
+apt-get "${DPKG_OPTS[@]}" install -y \
+    nodejs git jq curl coreutils procps \
+    python make clang binutils </dev/null
 
 # --- 2. npm globals -----------------------------------------------------------
-info "Installing @antseed/cli and @mariozechner/pi-coding-agent from npm..."
-npm install -g @antseed/cli @mariozechner/pi-coding-agent </dev/null
+info "Installing @antseed/cli and @earendil-works/pi-coding-agent from npm..."
+# Node's common.gypi android block references android_ndk_path; if node-gyp
+# ever resolves upstream headers instead of Termux's shipped ones, gyp fails
+# to parse without this define. Harmless when the variable is never referenced.
+export GYP_DEFINES="${GYP_DEFINES:+$GYP_DEFINES }android_ndk_path=$PREFIX"
+npm install -g @antseed/cli @earendil-works/pi-coding-agent </dev/null
 
 command -v antseed >/dev/null || die "antseed CLI not on PATH after npm install"
 command -v pi      >/dev/null || die "pi not on PATH after npm install"
