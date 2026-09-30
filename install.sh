@@ -57,28 +57,47 @@ apt_deb_arch() {
     esac
 }
 
-# Write $1 as the main-repo mirror, whichever apt layout this Termux has.
+# Write $1 as the main-repo mirror, whichever apt layout this Termux has, then
+# stop the `pkg` wrapper from overriding the choice: termux's select_mirror()
+# re-tests every mirror and weighted-randomly picks one at `pkg update` time
+# unless TERMUX_PKG_NO_MIRROR_SELECT is set, overwriting whatever we wrote (and
+# on deb822 layouts it would instead try to `source` a chosen_mirrors file and
+# abort the whole update if it doesn't define MAIN=/WEIGHT=).
 apply_termux_mirror() {
-    local url="$1" apt_dir="$PREFIX/etc/apt"
-    local mirror_cfg="$PREFIX/etc/termux/chosen_mirrors"
-    # Newer termux-tools: sources use mirror+file:.../chosen_mirrors. The file
-    # is a list tried in order — put the default back as a fallback entry.
-    if grep -rqs 'mirror+file:.*chosen_mirrors' "$apt_dir" 2>/dev/null; then
-        mkdir -p "$(dirname "$mirror_cfg")"
-        printf '%s\n' "$url" > "$mirror_cfg"
-        grep -qxF "${MIRRORS[0]}" "$mirror_cfg" || printf '%s\n' "${MIRRORS[0]}" >> "$mirror_cfg"
-        return 0
+    local url="$1" apt_dir="$PREFIX/etc/apt" wrote=1
+
+    # deb822 layout (newer Termux): sources.list.d/main.sources — its URIs line
+    # may point at `mirror+file:.../chosen_mirrors` or a plain https mirror.
+    if [ -f "$apt_dir/sources.list.d/main.sources" ]; then
+        sed -i.bak -E "s|^([[:space:]]*URIs:[[:space:]]+)[^[:space:]]+|\1${url}|" \
+            "$apt_dir/sources.list.d/main.sources"
+        wrote=0
     fi
-    # Older installs: rewrite the `deb <url> stable main` line in sources.list.
+
+    # Legacy layout: `deb <url> stable main` in sources.list.
     if [ -f "$apt_dir/sources.list" ] &&
        grep -qE '^deb[[:space:]]+https?://' "$apt_dir/sources.list"; then
         sed -i.bak -E \
             "s|^(deb[[:space:]]+)https?://[^[:space:]]+([[:space:]]+stable[[:space:]]+main.*)$|\1${url}\2|" \
             "$apt_dir/sources.list"
-        return 0
+        wrote=0
     fi
-    return 1
+
+    [ "$wrote" = 0 ] || return 1
+    export TERMUX_PKG_NO_MIRROR_SELECT=1
+    return 0
 }
+
+# Never leave a stale chosen_mirrors file behind: termux expects mirror *spec*
+# files (or symlinks to them) there; a stray file without MAIN= makes every
+# `pkg update` die with "None of the mirrors are accessible". Remove only the
+# URL-list artifact older versions of this script used to write — keep
+# user-created dirs/symlinks untouched.
+mirror_cfg="$PREFIX/etc/termux/chosen_mirrors"
+if [ -f "$mirror_cfg" ] && [ ! -L "$mirror_cfg" ] &&
+   grep -qE '^https?://' "$mirror_cfg"; then
+    rm -f "$mirror_cfg"
+fi
 
 choose_fast_mirror() {
     command -v curl >/dev/null 2>&1 || return 1
@@ -128,10 +147,12 @@ pkg update -y </dev/null
 # python + build-essential (clang, make, cmake, binutils): the node-gyp/cmake-js
 # toolchain — native modules like better-sqlite3 and node-datachannel ship no
 # android prebuilds, so they compile from source. openssl-static provides the
-# static OpenSSL libs node-datachannel's CMake config requires.
+# static OpenSSL libs node-datachannel's CMake config requires. cmake is only a
+# Recommends of build-essential (Termux apt skips Recommends) — list it
+# explicitly since cmake-js refuses to run without it.
 apt-get "${DPKG_OPTS[@]}" install -y \
     nodejs git jq curl coreutils procps \
-    python build-essential openssl-static </dev/null
+    python build-essential cmake openssl-static </dev/null
 
 # --- 2. npm globals -----------------------------------------------------------
 info "Installing @antseed/cli and @earendil-works/pi-coding-agent from npm..."

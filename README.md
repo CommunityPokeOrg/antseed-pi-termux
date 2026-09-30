@@ -44,8 +44,9 @@ curl -fsSL https://raw.githubusercontent.com/CommunityPokeOrg/antseed-pi-termux/
 The installer:
 
 1. probes a small set of official Termux mirrors and points `apt` at the
-   fastest one (keeps the default if probing fails — no prompts, safe under
-   `curl | bash`)
+   fastest one, pinning it via `TERMUX_PKG_NO_MIRROR_SELECT` so `pkg`'s own
+   mirror rotation doesn't override it (keeps the default if probing fails —
+   no prompts, safe under `curl | bash`)
 2. `pkg`/`apt-get install`s `nodejs`, `git`, `jq`, `curl`, `coreutils`, `procps`
    plus the native-build toolchain (`python`, `build-essential`,
    `openssl-static`) — `better-sqlite3` and `node-datachannel` ship no
