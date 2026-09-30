@@ -1,0 +1,161 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# antseed-pi — launch the pi coding agent wired to the AntSeed network on Termux.
+#
+# Ensures the AntSeed buyer proxy is running on http://localhost:8377, then
+# starts pi. Any arguments are passed through to pi.
+#
+# Subcommands (optional):
+#   antseed-pi            start proxy if needed, launch pi (default)
+#   antseed-pi status     show proxy + identity status
+#   antseed-pi stop       stop the buyer proxy
+#   antseed-pi logs       tail the buyer proxy log
+#   antseed-pi peers      list discovered AntSeed peers/services
+#   antseed-pi -- ...     everything after -- goes to pi verbatim
+
+set -euo pipefail
+
+ENV_DIR="${ANTSEED_PI_HOME:-$HOME/.antseed-pi}"
+ENV_FILE="$ENV_DIR/env"
+PID_FILE="$ENV_DIR/buyer.pid"
+LOG_FILE="$ENV_DIR/buyer.log"
+BASE_URL="${ANTSEED_BASE_URL:-http://localhost:8377}"
+READY_TIMEOUT="${ANTSEED_PI_READY_TIMEOUT:-60}"
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
+info()  { printf '%s[*]%s %s\n' "$GRN" "$RST" "$*"; }
+warn()  { printf '%s[!]%s %s\n' "$YEL" "$RST" "$*" >&2; }
+die()   { printf '%s[x]%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing '$1' — run install.sh first"; }
+
+load_env() {
+    mkdir -p "$ENV_DIR"
+    if [ -f "$ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$ENV_FILE"
+    fi
+    if [ -z "${ANTSEED_IDENTITY_HEX:-}" ]; then
+        if [ -t 0 ]; then
+            warn "No AntSeed identity configured."
+            printf 'Paste your secp256k1 private key hex (input hidden): '
+            read -rs ANTSEED_IDENTITY_HEX
+            printf '\n'
+            if [ -n "$ANTSEED_IDENTITY_HEX" ]; then
+                umask 077
+                printf 'ANTSEED_IDENTITY_HEX=%s\n' "$ANTSEED_IDENTITY_HEX" > "$ENV_FILE"
+                info "Identity saved to $ENV_FILE (mode 600)."
+            fi
+        fi
+        [ -n "${ANTSEED_IDENTITY_HEX:-}" ] || die "ANTSEED_IDENTITY_HEX not set — add it to $ENV_FILE or export it."
+    fi
+    export ANTSEED_IDENTITY_HEX
+}
+
+proxy_pid() {
+    [ -f "$PID_FILE" ] || return 1
+    local pid
+    pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+    printf '%s' "$pid"
+}
+
+proxy_ready() {
+    curl -fsS --max-time 3 "$BASE_URL/v1/models" >/dev/null 2>&1
+}
+
+start_proxy() {
+    if proxy_ready; then
+        info "Buyer proxy already listening on $BASE_URL"
+        return 0
+    fi
+    info "Starting AntSeed buyer proxy..."
+    # Keep the node process alive when the Termux session that launched it ends.
+    nohup antseed buyer start >>"$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+
+    local waited=0
+    until proxy_ready; do
+        if ! proxy_pid >/dev/null; then
+            warn "buyer proxy exited early — last log lines:"
+            tail -n 20 "$LOG_FILE" >&2 || true
+            die "antseed buyer start failed (see $LOG_FILE)"
+        fi
+        if [ "$waited" -ge "$READY_TIMEOUT" ]; then
+            die "proxy did not answer on $BASE_URL within ${READY_TIMEOUT}s (see $LOG_FILE)"
+        fi
+        sleep 2; waited=$((waited + 2))
+        printf '.'
+    done
+    printf '\n'
+    info "Buyer proxy up on $BASE_URL (pid $(proxy_pid), log: $LOG_FILE)"
+}
+
+stop_proxy() {
+    local pid
+    if pid=$(proxy_pid); then
+        kill "$pid" 2>/dev/null || true
+        rm -f "$PID_FILE"
+        info "Stopped buyer proxy (pid $pid)."
+    else
+        warn "No managed buyer proxy running."
+    fi
+}
+
+cmd_status() {
+    if proxy_ready; then
+        info "proxy: UP on $BASE_URL"
+    else
+        warn "proxy: DOWN"
+    fi
+    if [ -n "${ANTSEED_IDENTITY_HEX:-}" ]; then
+        info "identity: configured"
+    else
+        warn "identity: NOT configured ($ENV_FILE)"
+    fi
+    command -v antseed >/dev/null 2>&1 && info "antseed: $(antseed --version 2>/dev/null || echo present)"
+    command -v pi      >/dev/null 2>&1 && info "pi:      present"
+}
+
+cmd_logs() {
+    [ -f "$LOG_FILE" ] || die "no log yet at $LOG_FILE"
+    tail -n "${2:-50}" -f "$LOG_FILE"
+}
+
+cmd_peers() {
+    proxy_ready || die "proxy not running — start it with 'antseed-pi' first"
+    if command -v jq >/dev/null 2>&1; then
+        curl -fsS "$BASE_URL/_antseed/peers" | jq .
+    else
+        curl -fsS "$BASE_URL/_antseed/peers"
+    fi
+}
+
+main() {
+    need_cmd antseed
+    need_cmd pi
+    need_cmd curl
+
+    local sub=""
+    if [ $# -gt 0 ]; then sub="$1"; fi
+
+    case "$sub" in
+        status) load_env; cmd_status ;;
+        stop)   load_env; stop_proxy ;;
+        logs)   cmd_logs "$@" ;;
+        peers)  load_env; cmd_peers ;;
+        --)     shift; load_env; start_proxy; exec pi "$@" ;;
+        ""|start)
+            load_env
+            start_proxy
+            info "Starting pi — pick an AntSeed route with /model antseed/<service>@<peer>"
+            exec pi
+            ;;
+        *)  # anything else (e.g. -p "...", --model x) goes straight to pi
+            load_env
+            start_proxy
+            exec pi "$@"
+            ;;
+    esac
+}
+
+main "$@"
