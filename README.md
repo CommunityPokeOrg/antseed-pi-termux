@@ -14,7 +14,11 @@ in the model selector.
   CLIs, the launcher, the pi extension).
 - `antseed-pi` — launcher on your `$PATH`: starts the buyer proxy if it isn't
   running, waits for it to answer, then execs `pi`. Also manages the proxy
-  (`status` / `stop` / `logs` / `peers`).
+  (`status` / `stop` / `logs` / `peers`) and ships a **free-route model
+  picker** (`pick` / `models`) that bypasses pi's own (slow, sometimes
+  freezing) selector.
+- `antseed-pi-routes` — the dependency-free Node helper the picker uses; also
+  usable standalone for scripts (`--tsv`, `--json`, `--all`, `--refresh`).
 
 ## Prerequisites
 
@@ -54,7 +58,7 @@ The installer:
 3. `npm install -g --ignore-scripts @antseed/cli @earendil-works/pi-coding-agent`,
    then replays the native builds npm's lifecycle scripts can't do under
    Node >= 26 (node-datachannel is built directly with `cmake-js`)
-4. installs `bin/antseed-pi` to `$PREFIX/bin/antseed-pi`
+4. installs `bin/antseed-pi` and `bin/antseed-pi-routes` to `$PREFIX/bin`
 5. creates `~/.antseed-pi/env` for your identity
 6. runs `pi install git:github.com/AntSeed/pi-antseed` so the extension loads
    every time pi starts
@@ -74,14 +78,37 @@ or just run `antseed-pi` — it prompts for the key on first run and saves it
 
 ```bash
 termux-wake-lock   # recommended: stops Android killing the proxy
-antseed-pi
+antseed-pi pick
 ```
 
-Then inside pi open the model selector (`Ctrl+L` or `/model`) and pick a route:
+`antseed-pi pick` lists the **free** routes (zero-priced input/output on every
+provider that can serve them — unknown or missing prices are never shown as
+free), you pick a number, and it launches pi directly with
+`pi --model antseed/<service-id>@<peer>`. This avoids pi's built-in model
+selector entirely, which can hang or freeze on Termux when the network has
+many routes.
 
 ```
-antseed/<service-id>@<peer-prefix>[-<peer-name>][-rep<score>]
-# e.g. antseed/minimax-m2.7@bbbbbbbbbbbb-rep5
+  1) minimax-m2.7 @ some-peer (bbbbbbbb) · rep 78  [openai-responses]
+  2) img-gen @ eeeeeeeeeeee                        [openai-completions]
+Pick a route [1-2] (q to quit):
+```
+
+To see every route (paid and unknown-price too):
+
+```bash
+antseed-pi models          # free routes only
+antseed-pi models --all    # all routes, with a price column
+antseed-pi models --refresh   # force a DHT re-scan first
+```
+
+Or skip the picker: `antseed-pi` launches pi as before and you can use the
+in-app selector (`Ctrl+L` or `/model`) with ids of the form
+`antseed/<service-id>@<peer-prefix>[-<peer-name>][-rep<score>]`
+(e.g. `antseed/minimax-m2.7@bbbbbbbbbbbb-rep5`), or pass the id directly:
+
+```bash
+antseed-pi --model antseed/minimax-m2.7@bbbbbbbbbbbb-rep5
 ```
 
 Routes are discovered from `/_antseed/peers` and ordered by peer reputation.
@@ -90,13 +117,16 @@ To restrict what's offered, set e.g.
 
 Anything you pass to `antseed-pi` that isn't a subcommand is forwarded to `pi`
 (`antseed-pi --help`, `antseed-pi -p "hello"`, ...). Use `antseed-pi -- <args>`
-to force passthrough.
+to force passthrough — and inside `pick`, anything after `--` is forwarded too
+(`antseed-pi pick -- -p "hello"`).
 
 ### Helper commands
 
 | Command | What it does |
 | --- | --- |
 | `antseed-pi` / `antseed-pi start` | start proxy if needed + launch pi |
+| `antseed-pi pick` | pick a free route from a numbered menu, launch pi with `--model` |
+| `antseed-pi models [--all]` | list routes as pi registers them (default: free only) |
 | `antseed-pi status` | proxy / identity / CLI status |
 | `antseed-pi stop` | stop the managed buyer proxy |
 | `antseed-pi logs [N]` | tail the proxy log (`~/.antseed-pi/buyer.log`) |
@@ -120,6 +150,25 @@ extension registers an `antseed` provider in pi, reads each peer's advertised
 API protocol from `/_antseed/peers`, registers every service/peer pair as a pi
 model, and sends `x-antseed-pin-peer: <peer>` on each request. You never need a
 session-wide `antseed buyer connection set` pin.
+
+`antseed-pi-routes` replicates that discovery (same `/_antseed/peers` data,
+same `service@peer12[-name][-repN]` id format, same reputation precedence via
+`~/.antseed/buyer.state.json`, same `ANTSEED_MODELS` allow-list) and resolves
+each route's advertised price from `providerPricing` / unit-billing metadata.
+A route counts as free only when every provider that can serve it prices
+input, output, cached input, and per-image units at exactly $0; missing or
+partial pricing is reported as `unknown`, never free.
+
+## Tests
+
+```bash
+bash tests/run.sh
+```
+
+Offline suite: boots a stub buyer proxy with fixture peers, verifies
+free/paid/unknown classification, route id formatting (slug + rep suffix),
+reputation precedence, the `ANTSEED_MODELS` allow-list, and an end-to-end
+`antseed-pi pick` run against stub `antseed`/`pi` binaries.
 
 ## Configuration
 

@@ -1,0 +1,121 @@
+{
+  "ok": true,
+  "peers": [
+    {
+      "peerId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "displayName": "Free Node!",
+      "reputationScore": 3,
+      "providerServiceApiProtocols": {
+        "anthropic": { "services": { "free-llm": ["anthropic-messages"] } }
+      },
+      "providerPricing": {
+        "anthropic": {
+          "services": {
+            "free-llm": { "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "cachedInputUsdPerMillion": 0 }
+          }
+        }
+      }
+    },
+    {
+      "peerId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "providerServiceApiProtocols": {
+        "openai": { "services": { "paid-llm": ["openai-chat-completions"] } }
+      },
+      "providerPricing": {
+        "openai": {
+          "services": {
+            "paid-llm": { "inputUsdPerMillion": 0.5, "outputUsdPerMillion": 2 }
+          }
+        }
+      }
+    },
+    {
+      "peerId": "cccccccccccccccccccccccccccccccccccccccc",
+      "reputationScore": 5.2,
+      "providerServiceApiProtocols": {
+        "openrouter": { "services": { "unknown-llm": ["openai-responses"] } }
+      }
+    },
+    {
+      "peerId": "dddddddddddddddddddddddddddddddddddddddd",
+      "providerServiceApiProtocols": {
+        "openai": { "services": { "mixed-llm": ["openai-chat-completions"] } },
+        "openrouter": { "services": { "mixed-llm": ["openai-responses"] } }
+      },
+      "providerPricing": {
+        "openai": {
+          "services": { "mixed-llm": { "inputUsdPerMillion": 0, "outputUsdPerMillion": 0 } }
+        },
+        "openrouter": {
+          "services": { "mixed-llm": { "inputUsdPerMillion": 1, "outputUsdPerMillion": 1 } }
+        }
+      }
+    },
+    {
+      "peerId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "providerServiceApiProtocols": {
+        "openai": { "services": { "img-gen": ["openai-chat-completions"] } }
+      },
+      "providerServiceUnitBillingModels": {
+        "openai": {
+          "services": {
+            "img-gen": {
+              "openai-images": {
+                "version": 1,
+                "components": [{ "unit": "output_images", "priceUsd": 0 }]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "peerId": "ffffffffffffffffffffffffffffffffffffffff",
+      "providerServiceApiProtocols": {
+        "openai": { "services": { "partial-llm": ["openai-chat-completions"] } }
+      },
+      "providerPricing": {
+        "openai": {
+          "services": { "partial-llm": { "inputUsdPerMillion": 0 } }
+        }
+      }
+    },
+    {
+      "peerId": "1010101010101010101010101010101010101010",
+      "providerServiceApiProtocols": {
+        "anthropic": { "services": { "cached-fee": ["anthropic-messages"] } }
+      },
+      "providerPricing": {
+        "anthropic": {
+          "services": {
+            "cached-fee": { "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "cachedInputUsdPerMillion": 0.1 }
+          }
+        }
+      }
+    },
+    {
+      "peerId": "2020202020202020202020202020202020202020",
+      "providerServiceApiProtocols": {
+        "openai": { "services": { "img-paid": ["openai-chat-completions"] } }
+      },
+      "providerServiceUnitBillingModels": {
+        "openai": {
+          "services": {
+            "img-paid": {
+              "openai-images": {
+                "version": 1,
+                "components": [{ "unit": "output_images", "priceUsd": 0.02 }]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "peerId": "not-a-real-peer-id",
+      "providerServiceApiProtocols": {
+        "openai": { "services": { "ghost-llm": ["openai-chat-completions"] } }
+      }
+    }
+  ]
+}

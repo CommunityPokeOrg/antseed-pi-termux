@@ -6,6 +6,8 @@
 #
 # Subcommands (optional):
 #   antseed-pi            start proxy if needed, launch pi (default)
+#   antseed-pi pick       interactive picker of FREE routes, launches pi with --model
+#   antseed-pi models     list free routes (add --all for paid/unknown too)
 #   antseed-pi status     show proxy + identity status
 #   antseed-pi stop       stop the buyer proxy
 #   antseed-pi logs       tail the buyer proxy log
@@ -144,6 +146,94 @@ cmd_peers() {
     fi
 }
 
+# The route-listing helper installed next to antseed-pi (or beside it in a repo
+# checkout). Pure node, no deps.
+routes_bin() {
+    if command -v antseed-pi-routes >/dev/null 2>&1; then
+        command -v antseed-pi-routes
+    elif [ -f "$(dirname "${BASH_SOURCE[0]}")/antseed-pi-routes" ]; then
+        printf '%s\n' "$(dirname "${BASH_SOURCE[0]}")/antseed-pi-routes"
+    else
+        die "antseed-pi-routes helper not found — re-run install.sh"
+    fi
+}
+
+# models [--all|--tsv|--json|--refresh]: list routes exactly as the pi-antseed
+# extension registers them. Default shows only routes priced $0 on every
+# provider that can serve them (unknown price is never listed as free).
+cmd_models() {
+    shift
+    need_cmd node
+    proxy_ready || die "proxy not running — start it with 'antseed-pi' first"
+    node "$(routes_bin)" "$@"
+}
+
+# pick [--refresh] [-- pi-args...]: number-pick a free route, then exec pi
+# with --model antseed/<route>. Anything after `--` is forwarded to pi,
+# e.g. `antseed-pi pick -- -p "hello"`.
+cmd_pick() {
+    shift
+    local picker_args=() pi_args=() seen_ddash=0 arg
+    for arg in "$@"; do
+        if [ "$seen_ddash" = 1 ]; then
+            pi_args+=("$arg")
+        elif [ "$arg" = "--" ]; then
+            seen_ddash=1
+        else
+            picker_args+=("$arg")
+        fi
+    done
+
+    need_cmd node
+    require_identity
+    start_proxy
+
+    local rows=()
+    local tsv
+    if ! tsv="$(node "$(routes_bin)" --tsv "${picker_args[@]}")"; then
+        die "couldn't fetch routes from the proxy"
+    fi
+    while IFS= read -r line; do
+        [ -n "$line" ] && rows+=("$line")
+    done <<< "$tsv"
+
+    if [ "${#rows[@]}" -eq 0 ]; then
+        warn "No free AntSeed routes right now."
+        warn "Paid/unknown routes hidden — check 'antseed-pi models --all',"
+        warn "'antseed-pi peers', or run 'antseed-pi pick --refresh' to re-scan the DHT."
+        exit 1
+    fi
+
+    local i name
+    info "Free AntSeed routes (zero-priced input+output on every provider):"
+    for i in "${!rows[@]}"; do
+        name="$(printf '%s' "${rows[$i]}" | cut -f2)"
+        printf '  %s%2d)%s %s  %s[%s]%s\n' "$GRN" "$((i + 1))" "$RST" \
+            "$name" "$DIM" "$(printf '%s' "${rows[$i]}" | cut -f3)" "$RST"
+    done
+
+    if [ ! -t 0 ]; then
+        info "Non-interactive shell — pick with: antseed-pi --model antseed/<service>@<peer>"
+        printf '%s\n' "${rows[@]}"
+        exit 0
+    fi
+
+    printf 'Pick a route [1-%d] (q to quit): ' "${#rows[@]}"
+    local choice
+    read -r choice
+    case "$choice" in
+        q|Q|"") info "Aborted."; exit 0 ;;
+        *[!0-9]*) die "not a number: $choice" ;;
+    esac
+    [ "$choice" -ge 1 ] && [ "$choice" -le "${#rows[@]}" ] \
+        || die "out of range: $choice"
+
+    local model
+    model="$(printf '%s' "${rows[$((choice - 1))]}" | cut -f1)"
+    info "Starting pi with --model $model"
+    exec pi --model "$model" "${pi_args[@]}"
+}
+
 main() {
     need_cmd antseed
     need_cmd pi
@@ -157,6 +247,8 @@ main() {
         stop)   stop_proxy ;;
         logs)   cmd_logs "$@" ;;
         peers)  cmd_peers ;;
+        models) cmd_models "$@" ;;
+        pick)   cmd_pick "$@" ;;
         --)     shift; require_identity; start_proxy; exec pi "$@" ;;
         ""|start)
             require_identity

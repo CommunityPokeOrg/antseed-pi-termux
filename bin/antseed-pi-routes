@@ -1,0 +1,414 @@
+#!/usr/bin/env node
+'use strict';
+// antseed-pi-routes — list the model routes the pi-antseed extension would
+// register in pi, with resolved per-service pricing.
+//
+// Route discovery mirrors extensions/antseed.ts in
+// https://github.com/AntSeed/pi-antseed:
+//   * peers come from GET <proxy>/_antseed/peers
+//   * a service is routable when providerServiceApiProtocols advertises a
+//     supported protocol (openai-responses > anthropic-messages >
+//     openai-chat-completions > openai-completions)
+//   * registered model id = "<service>@<peerId[:12]>[-<peer-name-slug>][-rep<N>]"
+//     (all lowercased), reputation resolved buyer.state.json > HTTP on-chain >
+//     off-chain; ANTSEED_MODELS applies as a service/route allow-list
+//
+// Pricing mirrors packages/node/src/discovery/service-catalog.ts
+// (resolvePricing: services -> provider defaults -> peer defaults) and
+// modelRouteTotalPrice + the CLI's isFreeOffer in the AntSeed monorepo:
+//   * a route is FREE only when every provider that can serve it prices it at
+//     exactly $0 (input + output + cached-input, and any per-image unit price)
+//   * missing, partial, or negative pricing is UNKNOWN — never free
+//
+// Usage:
+//   antseed-pi-routes            # free routes, aligned table
+//   antseed-pi-routes --all      # every route, with price column
+//   antseed-pi-routes --tsv      # machine-readable: id<TAB>name<TAB>api<TAB>rep<TAB>price
+//   antseed-pi-routes --json     # JSON array of route objects
+//   antseed-pi-routes --refresh  # POST /_antseed/peers/refresh before listing
+//
+// Env: ANTSEED_BASE_URL, ANTSEED_MODELS, ANTSEED_DATA_DIR,
+//      ANTSEED_BUYER_STATE_FILE (same names as the pi extension)
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const BASE_URL = (process.env.ANTSEED_BASE_URL || 'http://localhost:8377')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/v1$/i, '') || 'http://localhost:8377';
+const PEERS_URL = `${BASE_URL}/_antseed/peers`;
+const REFRESH_URL = `${BASE_URL}/_antseed/peers/refresh`;
+const DISCOVERY_TIMEOUT_MS = 4000;
+
+const PEER_ID_PREFIX_LENGTH = 12;
+const PEER_NAME_SLUG_MAX = 24;
+
+// ── helpers shared with the extension ────────────────────────────────────────
+
+function asRecord(value) {
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function serviceKey(service) {
+    return String(service).trim().toLowerCase();
+}
+
+function isNetworkProtocol(value) {
+    return value === 'anthropic-messages'
+        || value === 'openai-responses'
+        || value === 'openai-chat-completions'
+        || value === 'openai-completions';
+}
+
+function toPiApi(protocol) {
+    return protocol === 'openai-chat-completions' ? 'openai-completions' : protocol;
+}
+
+function chooseApi(protocols) {
+    const supported = protocols.filter(isNetworkProtocol);
+    if (supported.length === 0) return null;
+    for (const protocol of ['openai-responses', 'anthropic-messages', 'openai-chat-completions', 'openai-completions']) {
+        if (supported.includes(protocol)) return toPiApi(protocol);
+    }
+    return toPiApi(supported[0]);
+}
+
+function routeRank(api) {
+    if (api === 'openai-responses') return 0;
+    if (api === 'anthropic-messages') return 1;
+    return 2;
+}
+
+function slugifyPeerName(name) {
+    return name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, PEER_NAME_SLUG_MAX);
+}
+
+function displayReputation(score) {
+    return Math.round(score);
+}
+
+function routeModelId(service, peerId, peerName, reputation) {
+    const slug = peerName ? slugifyPeerName(peerName) : '';
+    const slugSegment = slug ? `-${slug}` : '';
+    const repSegment = Number.isFinite(reputation) ? `-rep${displayReputation(reputation)}` : '';
+    return `${service}@${peerId.slice(0, PEER_ID_PREFIX_LENGTH)}${slugSegment}${repSegment}`;
+}
+
+// ── reputation: buyer.state.json -> HTTP on-chain -> HTTP off-chain ──────────
+
+function buyerStateFilePath() {
+    const explicit = (process.env.ANTSEED_BUYER_STATE_FILE || '').trim();
+    if (explicit) return explicit;
+    const dataDir = (process.env.ANTSEED_DATA_DIR || '').trim() || path.join(os.homedir(), '.antseed');
+    return path.join(dataDir, 'buyer.state.json');
+}
+
+function loadBuyerStateReputations() {
+    let raw;
+    try {
+        raw = fs.readFileSync(buyerStateFilePath(), 'utf8');
+    } catch {
+        return new Map();
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(raw);
+    } catch {
+        return new Map();
+    }
+    const peers = Array.isArray(asRecord(parsed)?.discoveredPeers) ? parsed.discoveredPeers : [];
+    const map = new Map();
+    for (const entry of peers) {
+        const record = asRecord(entry);
+        if (!record) continue;
+        const peerId = typeof record.peerId === 'string' ? record.peerId.trim().toLowerCase() : '';
+        if (!/^[0-9a-f]{40}$/.test(peerId)) continue;
+        if (typeof record.onChainReputationScore === 'number' && Number.isFinite(record.onChainReputationScore)) {
+            map.set(peerId, record.onChainReputationScore);
+            continue;
+        }
+        if (typeof record.reputationScore === 'number' && Number.isFinite(record.reputationScore)) {
+            map.set(peerId, record.reputationScore);
+        }
+    }
+    return map;
+}
+
+function peerReputation(peer, peerId, stateReputations) {
+    const fromState = stateReputations.get(peerId);
+    if (typeof fromState === 'number' && Number.isFinite(fromState)) return fromState;
+    if (typeof peer.onChainReputationScore === 'number' && Number.isFinite(peer.onChainReputationScore)) {
+        return peer.onChainReputationScore;
+    }
+    if (typeof peer.reputationScore === 'number' && Number.isFinite(peer.reputationScore)) {
+        return peer.reputationScore;
+    }
+    return Number.NEGATIVE_INFINITY;
+}
+
+function peerDisplayName(peer) {
+    if (typeof peer.displayName !== 'string') return null;
+    const trimmed = peer.displayName.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
+// ── pricing (service-catalog.resolvePricing + image unit billing) ────────────
+
+function resolveTokenPricing(peer, provider, serviceId) {
+    const entry = asRecord(asRecord(peer.providerPricing)?.[provider]);
+    const svc = asRecord(asRecord(entry?.services)?.[serviceId]);
+    const def = asRecord(entry?.defaults);
+    const pick = (long, short, peerKey) => {
+        for (const v of [svc?.[long], svc?.[short], def?.[long], def?.[short], peer[peerKey]]) {
+            if (typeof v === 'number' && Number.isFinite(v)) return v;
+        }
+        return undefined;
+    };
+    return {
+        input: pick('inputUsdPerMillion', 'input', 'defaultInputUsdPerMillion'),
+        output: pick('outputUsdPerMillion', 'output', 'defaultOutputUsdPerMillion'),
+        cached: pick('cachedInputUsdPerMillion', 'cachedInput', 'defaultCachedInputUsdPerMillion'),
+    };
+}
+
+function minImagePrice(peer, provider, serviceId) {
+    const billing = asRecord(
+        asRecord(asRecord(peer.providerServiceUnitBillingModels)?.[provider])?.services,
+    )?.[serviceId];
+    const byProtocol = asRecord(billing);
+    if (!byProtocol) return undefined;
+    let min;
+    for (const model of Object.values(byProtocol)) {
+        const components = asRecord(model)?.components;
+        if (!Array.isArray(components)) continue;
+        for (const component of components) {
+            const c = asRecord(component);
+            if (!c || c.unit !== 'output_images') continue;
+            if (typeof c.priceUsd === 'number' && Number.isFinite(c.priceUsd) && c.priceUsd >= 0) {
+                min = min === undefined ? c.priceUsd : Math.min(min, c.priceUsd);
+            }
+        }
+    }
+    return min;
+}
+
+// An offer is free only when every advertised price is exactly $0 — the same
+// bar the AntSeed CLI's isFreeOffer uses, extended to per-image unit billing.
+// Any missing input/output pair (with no image price) or negative/NaN value
+// means "unknown", which is never free.
+function offerPriceStatus(peer, provider, serviceId) {
+    const image = minImagePrice(peer, provider, serviceId);
+    const { input, output, cached } = resolveTokenPricing(peer, provider, serviceId);
+
+    if (typeof image === 'number') {
+        const tokenPriced = typeof input === 'number' || typeof output === 'number';
+        const tokenZero = !tokenPriced
+            || (input === 0 && output === 0 && (cached === undefined || cached === 0));
+        if (image === 0 && tokenZero) return { free: true, label: 'free' };
+        return { free: false, label: `$${image}/img` };
+    }
+
+    if (typeof input !== 'number' || input < 0 || typeof output !== 'number' || output < 0) {
+        return { free: false, label: 'unknown' };
+    }
+    if (cached !== undefined && (typeof cached !== 'number' || cached < 0)) {
+        return { free: false, label: 'unknown' };
+    }
+    if (input === 0 && output === 0 && (cached === undefined || cached === 0)) {
+        return { free: true, label: 'free' };
+    }
+    return { free: false, label: `$${input}+$${output}/M` };
+}
+
+// ── route building (extension parity) ────────────────────────────────────────
+
+function collectRoutes(peers, stateReputations) {
+    // key: serviceKey(routeModelId) — same key the extension registers.
+    const routes = new Map();
+    for (const peer of peers) {
+        const peerId = typeof peer.peerId === 'string' ? peer.peerId.trim().toLowerCase() : '';
+        if (!/^[0-9a-f]{40}$/.test(peerId)) continue;
+
+        const matrix = asRecord(peer.providerServiceApiProtocols);
+        if (!matrix) continue;
+
+        const reputation = peerReputation(peer, peerId, stateReputations);
+        const peerName = peerDisplayName(peer);
+
+        for (const [provider, rawEntry] of Object.entries(matrix)) {
+            const services = asRecord(asRecord(rawEntry)?.services);
+            if (!services) continue;
+            for (const [service, rawProtocols] of Object.entries(services)) {
+                if (!Array.isArray(rawProtocols)) continue;
+                const api = chooseApi(rawProtocols);
+                if (!api) continue;
+
+                const key = serviceKey(routeModelId(service, peerId, peerName, reputation));
+                const price = offerPriceStatus(peer, provider, service);
+                const existing = routes.get(key);
+                if (!existing) {
+                    routes.set(key, {
+                        id: key,
+                        api,
+                        peerId,
+                        peerName,
+                        serviceId: service,
+                        reputation,
+                        offers: [price],
+                    });
+                } else {
+                    existing.offers.push(price);
+                    if (routeRank(api) < routeRank(existing.api)) existing.api = api;
+                }
+            }
+        }
+    }
+    return routes;
+}
+
+function applyAllowList(routes) {
+    const raw = process.env.ANTSEED_MODELS;
+    if (!raw) return;
+    const allow = new Set(raw.split(',').map((id) => serviceKey(id)).filter(Boolean));
+    for (const [key, route] of [...routes.entries()]) {
+        if (!allow.has(key) && !allow.has(serviceKey(route.serviceId))) routes.delete(key);
+    }
+}
+
+function sortRoutes(entries) {
+    return entries.sort(([, a], [, b]) => {
+        if (a.reputation !== b.reputation) return b.reputation - a.reputation;
+        const labelA = a.peerName ?? a.peerId;
+        const labelB = b.peerName ?? b.peerId;
+        if (labelA !== labelB) return labelA.localeCompare(labelB);
+        return a.serviceId.localeCompare(b.serviceId);
+    });
+}
+
+function routeFree(route) {
+    return route.offers.every((offer) => offer.free);
+}
+
+function routePriceLabel(route) {
+    if (routeFree(route)) return 'free';
+    return [...new Set(route.offers.map((o) => o.label))].join(' | ');
+}
+
+function routeDisplayName(route) {
+    const peerLabel = route.peerName
+        ? `${route.peerName} (${route.peerId.slice(0, 8)})`
+        : route.peerId.slice(0, 12);
+    const rep = Number.isFinite(route.reputation) ? ` · rep ${displayReputation(route.reputation)}` : '';
+    return `${route.serviceId} @ ${peerLabel}${rep}`;
+}
+
+// ── IO ───────────────────────────────────────────────────────────────────────
+
+async function fetchJson(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DISCOVERY_TIMEOUT_MS);
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        return await response.json();
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function refreshPeers() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+        const response = await fetch(REFRESH_URL, { method: 'POST', signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function usage() {
+    console.log(`antseed-pi-routes — list AntSeed routes as pi registers them
+
+  (default)      free routes only, aligned table
+  --all          include paid and unknown-price routes
+  --tsv          id<TAB>name<TAB>api<TAB>rep<TAB>price per line
+  --json         JSON array of route objects
+  --refresh      ask the proxy to re-scan the DHT first (can take ~30s)
+
+"Free" means every provider serving the route prices input, output, cached
+input and per-image units at exactly $0. Missing/unknown price is never free.`);
+}
+
+async function main() {
+    const args = process.argv.slice(2);
+    const json = args.includes('--json');
+    const tsv = args.includes('--tsv');
+    const all = args.includes('--all');
+    const refresh = args.includes('--refresh');
+    if (args.includes('--help') || args.includes('-h')) {
+        usage();
+        return;
+    }
+
+    if (refresh) {
+        try {
+            await refreshPeers();
+        } catch (err) {
+            console.error(`[antseed-pi-routes] peer refresh failed: ${err.message} — listing cached peers`);
+        }
+    }
+
+    const body = asRecord(await fetchJson(PEERS_URL));
+    const peers = Array.isArray(body?.peers) ? body.peers : [];
+    const routes = collectRoutes(peers, loadBuyerStateReputations());
+    applyAllowList(routes);
+    const entries = sortRoutes([...routes.entries()]).map(([, route]) => route);
+    const visible = all ? entries : entries.filter(routeFree);
+
+    if (json) {
+        console.log(JSON.stringify(visible.map((route) => ({
+            id: `antseed/${route.id}`,
+            name: routeDisplayName(route),
+            api: route.api,
+            reputation: Number.isFinite(route.reputation) ? displayReputation(route.reputation) : null,
+            free: routeFree(route),
+            price: routePriceLabel(route),
+        })), null, 2));
+        return;
+    }
+
+    if (tsv) {
+        for (const route of visible) {
+            const rep = Number.isFinite(route.reputation) ? String(displayReputation(route.reputation)) : '';
+            console.log(`antseed/${route.id}\t${routeDisplayName(route)}\t${route.api}\t${rep}\t${routePriceLabel(route)}`);
+        }
+        return;
+    }
+
+    if (visible.length === 0) {
+        console.log(all ? 'No AntSeed routes discovered.' : 'No free AntSeed routes discovered (try --all to see paid ones).');
+        return;
+    }
+    const rows = visible.map((route) => [
+        `antseed/${route.id}`,
+        routeDisplayName(route),
+        route.api,
+        routePriceLabel(route),
+    ]);
+    const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+    for (const row of rows) {
+        console.log(row.map((cell, i) => cell.padEnd(widths[i])).join('  '));
+    }
+}
+
+main().catch((err) => {
+    console.error(`[antseed-pi-routes] ${err.message}`);
+    process.exit(1);
+});

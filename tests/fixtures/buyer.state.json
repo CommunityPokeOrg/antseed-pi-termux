@@ -1,0 +1,12 @@
+{
+  "discoveredPeers": [
+    {
+      "peerId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "onChainReputationScore": 78.4
+    },
+    {
+      "peerId": "cccccccccccccccccccccccccccccccccccccccc",
+      "reputationScore": 9
+    }
+  ]
+}

@@ -210,10 +210,13 @@ info "Installing the antseed-pi launcher into \$PREFIX/bin..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 if [ -f "$SCRIPT_DIR/bin/antseed-pi" ]; then
     install -m 0755 "$SCRIPT_DIR/bin/antseed-pi" "$PREFIX/bin/antseed-pi"
+    install -m 0755 "$SCRIPT_DIR/bin/antseed-pi-routes" "$PREFIX/bin/antseed-pi-routes"
 else
-    curl -fsSL "https://raw.githubusercontent.com/CommunityPokeOrg/antseed-pi-termux/main/bin/antseed-pi" \
-        -o "$PREFIX/bin/antseed-pi" </dev/null
-    chmod 0755 "$PREFIX/bin/antseed-pi"
+    for tool in antseed-pi antseed-pi-routes; do
+        curl -fsSL "https://raw.githubusercontent.com/CommunityPokeOrg/antseed-pi-termux/main/bin/$tool" \
+            -o "$PREFIX/bin/$tool" </dev/null
+        chmod 0755 "$PREFIX/bin/$tool"
+    done
 fi
 
 # --- 4. state dir + identity file ---------------------------------------------
@@ -238,10 +241,11 @@ cat <<'EOF'
   1. Add your identity key:   edit ~/.antseed-pi/env  (or let antseed-pi prompt)
   2. Optional but recommended:
        termux-wake-lock       # keep Android from killing the proxy
-  3. Launch:                  antseed-pi
-  4. In pi, pick a route:     /model antseed/<service-id>@<peer-prefix>
+  3. Launch:                  antseed-pi pick   (free routes only — recommended)
+       or:                    antseed-pi        (then /model in pi)
+  4. List routes:             antseed-pi models (--all to include paid)
   5. Fund with USDC:          antseed buyer deposit   (or: antseed payments)
   6. Browse the network:      antseed network browse --services
 
-  Helpers: antseed-pi status | stop | logs | peers
+  Helpers: antseed-pi pick | models | status | stop | logs | peers
 EOF
